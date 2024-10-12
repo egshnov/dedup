@@ -1,0 +1,14 @@
+# Настройки ide
+*.vscode
+*.clang-format
+
+#Следы сборки
+*.cmd
+*.mod
+*.d
+*.ko
+*.mod.c
+*.mod.o
+*.o
+*.symvers
+*.order
