@@ -1,6 +1,6 @@
-# blkmr
+# dedup
 
-Bio-based block device-mapper driver module for Linux kernel that implements deduplication.
+Device-mapper driver module for Linux kernel that implements deduplication.
 
 ## Kernel version
 
@@ -12,18 +12,17 @@ Run `make` form the repo's directory.
 
 ## Load
 
-Run `sudo insmod blkm.ko`.
-You will see `blkm` appear in `lsmod`.
+Run `sudo insmod dedup.ko`.
+You will see `dedup` appear in `lsmod`.
 
 ## Adding device
 
-After building and inserting module go to `/sys/module/blkm/parameters`
+run `sudo echo 0 20000 dedup /dev/name_of_the_underlying_device 0|sudo dmsetup create <name of the new device>`   
 
-To add underlying device do `echo "<path_to_block_device>" >> device_pipe`.
-You will see `bdevm1` appear in `lsblk`.  
-
-To remove underlying device do `echo >> rm_device`.  
+run 'sudo dmsetup ls' and `lsblk` to check that dedup instantiated correctly
 
 ## Usage 
-`sudo dd if=input of=/dev/blkm1 oflag=direct bs=4K count=128` — copy from input file to underlying device   
+`sudo dd if=input of=/dev/mapper/dedup oflag=direct bs=4K count=128` — copy from input file to underlying device  
+
 `sudo dd of=output if=/dev/blkm1 iflag=direct bs=4K count=128` —  copy from underlying device to ouput file
+
