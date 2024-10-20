@@ -1,4 +1,4 @@
-# dedup
+# dedup (WIP)
 
 Device-mapper driver module for Linux kernel that implements deduplication.
 
