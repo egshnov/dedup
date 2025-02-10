@@ -1,0 +1,19 @@
+# Настройки ide
+*.vscode
+*.clang-format
+*.vscode-ctags
+#Следы сборки
+*.cmd
+*.mod
+*.d
+*.ko
+*.mod.c
+*.mod.o
+*.o
+*.symvers
+*.order
+
+#вспомгательные скрипты
+*.sh
+#счетчик строк
+*.VSCodeCounter
