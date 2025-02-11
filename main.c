@@ -1,69 +1,216 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/init.h>
+#include <linux/bio.h>
+#include <linux/device-mapper.h>
 #include <linux/blkdev.h>
 #include <linux/blk_types.h>
+#include <linux/xxhash.h>
+#include <linux/kstrtox.h>
+#include <linux/slab.h>
+#include <linux/dm-bufio.h>
+#include <linux/mm.h>
+#include <linux/highmem.h>
+#include <linux/kernel.h>
 #include "index/memtable.h"
+#include <linux/dm-io.h>
+#include <linux/blkdev.h>
+#include <linux/highmem.h>
+#include <linux/mm.h>
+#include <linux/slab.h>
 
-#define DEVICE_NAME "dedup"
-#define GD_NAME "dedup_gd"
+#define TARGET_NAME "dedup"
 #define CHUNK_SIZE 4096
-#define SECTOR_SHIFT 9
+#define SECTOR_SHIFT 9 /* 512-byte sectors => shift by 9 */
 
-static struct dedup_target
+// TODO: cahnge bio_alloc_bioset to GFP_NOIO
+
+/* Main structure for device mapper target */
+struct dedup_target
 {
-    struct block_device *bdev;
-    struct gendisk *gd;
-    struct bio_set bs;
+    struct dm_dev *dev;
     sector_t head;
     struct hash_pbn_memtable *hash_pbn;
     struct lbn_pbn_memtable *lbn_pbn;
-    int major;
-} dedup;
-static void dedup_submit_bio(struct bio *bio)
-{
-}
-
-static const struct block_device_operations dedup_bio_ops = {
-    .owner = THIS_MODULE,
-    .submit_bio = dedup_submit_bio,
+    struct bio_set bs;
 };
 
-static int set_gendisk()
+static int process_read(struct dedup_target *target, struct bio *bio)
 {
-    int err;
+    int ret;
+    pr_info("process_read: read called\n");
+    bio_set_dev(bio, target->dev->bdev);
+    pr_info("process_read: submitting sub_bio\n");
 
-    dedup.gd = blk_alloc_disk(NULL, NUMA_NO_NODE);
-    if (!dedup.gd)
-        goto no_mem;
+    submit_bio_noacct(bio);
+    pr_info("process_read: bio passed \n");
 
-    dedup.gd->major = dedup.major;
-    dedup.gd->first_minor = 1;
-    dedup.gd->minors = 1;
-    dedup.gd->fops = &dedup_bio_ops;
-    dedup.gd->private_data = &dedup;
-    dedup.gd->flags |= GENHD_FL_NO_PART;
-    strcpy(dedup.gd->disk_name, GD_NAME);
-    set_capacity(dedup.gd, get_capacity(dedup.bdev->bd_disk));
+    return ret;
+}
+static int process_write(struct dedup_target *target, struct bio *bio)
+{
+    int ret;
+    pr_info("process_write: read called\n");
+    bio_set_dev(bio, target->dev->bdev);
+    pr_info("process_write: submitting sub_bio\n");
 
-    err = add_disk(dedup.gd);
-    if (err)
-        goto disk_err;
-no_mem:
-    pr_err("set_gendisk: couldn't allocate gendisk\n");
+    submit_bio_noacct(bio);
+    return ret;
+}
+
+static int dedup_target_map(struct dm_target *ti, struct bio *bio)
+{
+    pr_info("dedup_target_map: mapping bio, bio_op=%d\n", bio_op(bio));
+    struct dedup_target *target = ti->private;
+    int res;
+
+    if (bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE)
+    {
+        bio_set_dev(bio, target->dev->bdev);
+        pr_info("dedup_target_map: Passing through non-read/write bio\n");
+        return DM_MAPIO_REMAPPED;
+    }
+
+    if (bio_op(bio) == REQ_OP_WRITE)
+    {
+        res = process_write(target, bio);
+        if (res != DM_MAPIO_SUBMITTED)
+        {
+            pr_err("dedup_target_map: Write bio processing failed, returning DM_MAPIO_KILL\n");
+            return DM_MAPIO_KILL;
+        }
+        return DM_MAPIO_SUBMITTED;
+    }
+    else
+    {
+        res = process_read(target, bio);
+        if (res != DM_MAPIO_SUBMITTED)
+        {
+            pr_err("dedup_target_map: Read bio processing failed, returning DM_MAPIO_KILL\n");
+            return DM_MAPIO_KILL;
+        }
+        return DM_MAPIO_SUBMITTED;
+    }
+}
+
+/* Controller function for dm target */
+static int dedup_target_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+{
+    struct dedup_target *target;
+    sector_t head;
+    int ret;
+    pr_info("dedup_target_ctr: in\n");
+
+    if (argc != 2)
+    {
+        pr_err("dedup_target_ctr: Invalid number of arguments\n");
+        ti->error = "Invalid number of arguments";
+        return -EINVAL;
+    }
+
+    target = kzalloc(sizeof(*target), GFP_KERNEL);
+    if (!target)
+        goto no_mem_for_target;
+
+    ret = bioset_init(&target->bs, 128, 0, BIOSET_NEED_BVECS);
+    if (ret)
+    {
+        pr_err("dedup_target_ctr: bioset_init failed with %d\n", ret);
+        goto cant_init_bioset;
+    }
+    pr_info("dedup_target_ctr: Initialized bioset at %p\n", &target->bs);
+
+    if (sscanf(argv[1], "%llu", &head) != 1)
+    {
+        ti->error = "dedup_target_ctr: Invalid device sector";
+        goto error;
+    }
+    target->head = head;
+    pr_info("dedup_target_ctr: Using head=%llu\n", (unsigned long long)head);
+
+    if (dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &target->dev))
+    {
+        ti->error = "dedup_target_ctr: Device lookup failed";
+        goto error;
+    }
+    pr_info("dedup_target_ctr: Device lookup succeeded; target->dev = %p, bdev = %p\n",
+            target->dev, target->dev ? target->dev->bdev : NULL);
+
+    target->hash_pbn = create_hash_pbn();
+    target->lbn_pbn = create_lbn_pbn();
+    if (!target->hash_pbn || !target->lbn_pbn)
+        goto cant_alloc_index;
+
+    pr_info("dedup_target_ctr: memtables created successfully\n");
+    ti->private = target;
+    pr_info("dedup_target_ctr: out\n");
+    return 0;
+
+cant_init_bioset:
+    pr_err("dedup_target_ctr: bioset_init failed with %d\n", ret);
+    kfree(target);
+    return ret;
+cant_alloc_index:
+    kfree(target->hash_pbn);
+    kfree(target->lbn_pbn);
+    kfree(target);
+    pr_err("dedup_target_ctr: Couldn't allocate index structures\n");
     return -ENOMEM;
-disk_err:
-    pr_err("set_gendisk: couldn't add gendisk %d\n", err);
-    put_disk(dedup.gd);
-    dedup.gd = NULL;
-    return err;
-};
 
-static int init_dedup(void)
-{
-    
+error:
+    kfree(target);
+    pr_err("dedup_target_ctr: %s\n", ti->error);
+    return -EINVAL;
+
+no_mem_for_target:
+    pr_err("dedup_target_ctr: Could not allocate dedup target structure\n");
+    ti->error = "Cannot allocate dedup target";
+    return -ENOMEM;
 }
+
+static void dedup_target_dtr(struct dm_target *ti)
+{
+    struct dedup_target *target = ti->private;
+    pr_info("dedup_target_dtr: in\n");
+    dm_put_device(ti, target->dev);
+    bioset_exit(&target->bs);
+    free_hash_pbn(target->hash_pbn);
+    free_lbn_pbn(target->lbn_pbn);
+    kfree(target);
+    pr_info("dedup_target_dtr: out\n");
+}
+
+static struct target_type dedup_ops = {
+    .name = TARGET_NAME,
+    .version = {0, 0, 1},
+    .module = THIS_MODULE,
+    .ctr = dedup_target_ctr,
+    .dtr = dedup_target_dtr,
+    .map = dedup_target_map,
+};
 
 static int __init dedup_init(void)
 {
-    int err;
+    int res = dm_register_target(&dedup_ops);
+    if (res < 0)
+    {
+        pr_err("dedup_init: Couldn't register target (res=%d)\n", res);
+        return -res;
+    }
+    pr_info("dedup_init: Target registered successfully\n");
+    return 0;
 }
+
+static void dedup_exit(void)
+{
+    dm_unregister_target(&dedup_ops);
+    pr_info("dedup_exit: Target unregistered\n");
+}
+
+module_init(dedup_init);
+module_exit(dedup_exit);
+
+MODULE_AUTHOR("Egor Shalashnov <shalasheg@gmail.com>");
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Deduplication driver");
+MODULE_SOFTDEP("pre: dm-bufio");
