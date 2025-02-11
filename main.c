@@ -21,6 +21,7 @@
 
 #define TARGET_NAME "dedup"
 #define CHUNK_SIZE 4096
+#define MIN_DEDUP_WORK_IO 16
 #define SECTOR_SHIFT 9 /* 512-byte sectors => shift by 9 */
 
 // TODO: cahnge bio_alloc_bioset to GFP_NOIO
@@ -28,11 +29,23 @@
 /* Main structure for device mapper target */
 struct dedup_target
 {
+    /* deduplication logic fields */
     struct dm_dev *dev;
     sector_t head;
     struct hash_pbn_memtable *hash_pbn;
     struct lbn_pbn_memtable *lbn_pbn;
+
+    /*bio resubmitting logic fields*/
+    struct workqueue_struct *wq;
+    mempool_t *work_pool;
     struct bio_set bs;
+};
+
+struct dedup_work
+{
+    struct work_struct worker;
+    struct dedup_target *target;
+    struct bio *bio;
 };
 
 static int process_read(struct dedup_target *target, struct bio *bio)
@@ -57,11 +70,9 @@ static int process_write(struct dedup_target *target, struct bio *bio)
     submit_bio_noacct(bio);
     return ret;
 }
-
-static int dedup_target_map(struct dm_target *ti, struct bio *bio)
+static int process_bio(struct dedup_target *target, struct bio *bio)
 {
     pr_info("dedup_target_map: mapping bio, bio_op=%d\n", bio_op(bio));
-    struct dedup_target *target = ti->private;
     int res;
 
     if (bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE)
@@ -91,6 +102,39 @@ static int dedup_target_map(struct dm_target *ti, struct bio *bio)
         }
         return DM_MAPIO_SUBMITTED;
     }
+}
+static void do_work(struct work_struct *ws)
+{
+    struct dedup_work *data = container_of(ws, struct dedup_work, worker);
+    struct dedup_target *target = (struct dedup_target *)data->target;
+    struct bio *bio = (struct bio *)data->bio;
+
+    mempool_free(data, target->work_pool);
+
+    process_bio(target, bio);
+}
+
+static void defer_bio(struct dedup_target *target, struct bio *bio)
+{
+    struct dedup_work *data;
+    data = mempool_alloc(target->work_pool, GFP_NOIO);
+    if (!data)
+    {
+        bio->bi_status = BLK_STS_RESOURCE;
+        bio_endio(bio);
+        return;
+    }
+    data->bio = bio;
+    data->target = target;
+    INIT_WORK(&(data->worker), do_work);
+    queue_work(target->wq, &(data->worker));
+}
+
+static int dedup_map(struct dm_target *ti, struct bio *bio)
+{
+    struct dedup_target *target = (struct dedup_target *)ti->private;
+    defer_bio(target, bio);
+    return DM_MAPIO_SUBMITTED;
 }
 
 /* Controller function for dm target */
@@ -142,29 +186,65 @@ static int dedup_target_ctr(struct dm_target *ti, unsigned int argc, char **argv
         goto cant_alloc_index;
 
     pr_info("dedup_target_ctr: memtables created successfully\n");
+    target->wq = create_singlethread_workqueue("dedup");
+    if (!target->wq)
+    {
+        ti->error = "failed to create workqueue";
+        ret = -ENOMEM;
+        goto cant_create_wq;
+    }
+    pr_info("dedup_target_ctr: qorkqueue created\n");
+
+    target->work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
+                                                    sizeof(struct dedup_work));
+    if (!target->work_pool)
+    {
+        ti->error = "failed to create dedup mempool";
+        ret = -ENOMEM;
+        goto cant_create_workpool;
+    }
+    pr_info("dedup_target_ctr: workpool create\n");
     ti->private = target;
     pr_info("dedup_target_ctr: out\n");
     return 0;
 
+// TODO: simplify errors
+no_mem_for_target:
+    pr_err("dedup_target_ctr: Could not allocate dedup target structure\n");
+    ti->error = "Cannot allocate dedup target";
+    return -ENOMEM;
 cant_init_bioset:
     pr_err("dedup_target_ctr: bioset_init failed with %d\n", ret);
     kfree(target);
     return ret;
+error:
+    bioset_exit(&(target->bs));
+    kfree(target);
+    pr_err("dedup_target_ctr: %s\n", ti->error);
+    return -EINVAL;
 cant_alloc_index:
-    kfree(target->hash_pbn);
-    kfree(target->lbn_pbn);
+    free_hash_pbn(target->hash_pbn);
+    free_lbn_pbn(target->lbn_pbn);
+    bioset_exit(&(target->bs));
     kfree(target);
     pr_err("dedup_target_ctr: Couldn't allocate index structures\n");
     return -ENOMEM;
 
-error:
+cant_create_wq:
+    free_hash_pbn(target->hash_pbn);
+    free_lbn_pbn(target->lbn_pbn);
+    bioset_exit(&(target->bs));
     kfree(target);
-    pr_err("dedup_target_ctr: %s\n", ti->error);
-    return -EINVAL;
+    pr_err("dedup_target_ctr: Couldn't allocate index structures\n");
+    return -ENOMEM;
 
-no_mem_for_target:
-    pr_err("dedup_target_ctr: Could not allocate dedup target structure\n");
-    ti->error = "Cannot allocate dedup target";
+cant_create_workpool:
+    free_hash_pbn(target->hash_pbn);
+    free_lbn_pbn(target->lbn_pbn);
+    bioset_exit(&(target->bs));
+    destroy_workqueue(target->wq);
+    kfree(target);
+    pr_err("dedup_target_ctr: Couldn't allocate index structures\n");
     return -ENOMEM;
 }
 
@@ -176,6 +256,8 @@ static void dedup_target_dtr(struct dm_target *ti)
     bioset_exit(&target->bs);
     free_hash_pbn(target->hash_pbn);
     free_lbn_pbn(target->lbn_pbn);
+    destroy_workqueue(target->wq);
+    mempool_destroy(target->work_pool);
     kfree(target);
     pr_info("dedup_target_dtr: out\n");
 }
@@ -186,7 +268,7 @@ static struct target_type dedup_ops = {
     .module = THIS_MODULE,
     .ctr = dedup_target_ctr,
     .dtr = dedup_target_dtr,
-    .map = dedup_target_map,
+    .map = dedup_map,
 };
 
 static int __init dedup_init(void)
