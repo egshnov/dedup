@@ -60,10 +60,48 @@ static int process_read(struct dedup_target *target, struct bio *bio)
 
     return ret;
 }
+
+static int compute_bio_hash(struct bio *bio, u64 *hash)
+{
+    struct xxh64_state state;
+    struct bio_vec bvec;
+    struct bvec_iter iter;
+    unsigned long flags;
+
+    xxh64_reset(&state, 0);
+
+    bio_for_each_segment(bvec, bio, iter)
+    {
+        char *data = kmap_local_page(bvec.bv_page);
+
+        if (!data)
+        {
+            pr_err("Failed to map bio segment\n");
+            return -EINVAL; // TODO: change error flag
+        }
+
+        xxh64_update(&state, data + bvec.bv_offset, bvec.bv_len);
+        kunmap_local(data);
+    }
+
+    *hash = xxh64_digest(&state);
+    return 0;
+}
+
 static int process_write(struct dedup_target *target, struct bio *bio)
 {
+    u64 hash;
     int ret;
     pr_info("process_write: read called\n");
+    int r = compute_bio_hash(bio, &hash);
+    if (r)
+    {
+        pr_err("process_write: couldn't calculatere hash for the bio\n");
+    }
+    else
+    {
+        pr_info("process_write: hash for bio is %llu\n", hash);
+    }
     bio_set_dev(bio, target->dev->bdev);
     pr_info("process_write: submitting sub_bio\n");
 
@@ -137,7 +175,7 @@ static int dedup_map(struct dm_target *ti, struct bio *bio)
     return DM_MAPIO_SUBMITTED;
 }
 
-/* Controller function for dm target */
+/* Constructor function for dm target */
 static int dedup_target_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
     struct dedup_target *target;
