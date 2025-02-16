@@ -32,6 +32,7 @@ int hash_pbn_add(struct hash_pbn_memtable *table, hash_t hash, sector_t pbn);
 bool hash_pbn_get(struct hash_pbn_memtable *table, hash_t hash, sector_t **res, int *res_len);
 
 /*rb_tree that stores lbn->pbn entries*/
+//TODO: change to using xarray
 struct lbn_pbn_memtable
 {
     struct rb_root root;

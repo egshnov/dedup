@@ -216,7 +216,7 @@ static int __lbn_pbn_underlying_insert(struct rb_root *root, sector_t lbn, secto
             pr_info("__lbn_pbn_underlying_insert: Updating node for lbn %llu with new pbn %llu\n",
                     (unsigned long long)lbn, (unsigned long long)pbn);
             this->pbn = pbn;
-            return 1;
+            return 0;
         }
     }
     struct lbn_pbn_node *data = create_lbn_pbn_node(lbn, pbn);
