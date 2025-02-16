@@ -1,3 +1,5 @@
+#include <linux/slab.h>
+#include <linux/device-mapper.h>
 #include "pbn_manager.h"
 
 static struct pbn_rb_node *create_pbn_rb_node(uint64_t pbn)

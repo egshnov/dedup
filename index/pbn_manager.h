@@ -1,3 +1,5 @@
+#ifndef DEDUP_PBN_MANAGER
+#define DEDUP_PBN_MANAGER
 #include <linux/types.h>
 #include <linux/rbtree.h>
 #include <linux/list.h>
@@ -40,3 +42,4 @@ int inc_refcount(struct pbn_manager *manager, uint64_t pbn);
 int dec_refcount(struct pbn_manager *manager, uint64_t pbn);
 
 int alloc_pbn(struct pbn_manager *manager, uint64_t *pbn);
+#endif

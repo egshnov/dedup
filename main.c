@@ -12,28 +12,29 @@
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/kernel.h>
-#include "index/memtable.h"
 #include <linux/dm-io.h>
-#include <linux/blkdev.h>
-#include <linux/highmem.h>
-#include <linux/mm.h>
-#include <linux/slab.h>
+#include "index/memtable.h"
+#include "index/pbn_manager.h"
 
 #define TARGET_NAME "dedup"
 #define CHUNK_SIZE 4096
 #define MIN_DEDUP_WORK_IO 16
 #define SECTOR_SHIFT 9 /* 512-byte sectors => shift by 9 */
 
-// TODO: cahnge bio_alloc_bioset to GFP_NOIO
+// TODO: cahnge bio_alloc_bioset to GFP_NOIO?
 
 /* Main structure for device mapper target */
 struct dedup_target
 {
-    /* deduplication logic fields */
     struct dm_dev *dev;
     sector_t head;
+    sector_t sectors_per_block; // TODO: pass chunk size as arg
+
+    /* deduplication logic fields */
     struct hash_pbn_memtable *hash_pbn;
     struct lbn_pbn_memtable *lbn_pbn;
+    struct pbn_manager *manager;
+    // TODO: add refcounter for lbns (for deletion)
 
     /*bio resubmitting logic fields*/
     struct workqueue_struct *wq;
@@ -48,17 +49,55 @@ struct dedup_work
     struct bio *bio;
 };
 
+static void do_io_remap_device(struct dedup_target *target, struct bio *bio)
+{
+    bio_set_dev(bio, target->dev->bdev);
+    submit_bio_noacct(bio);
+}
+
+static void do_io(struct dedup_target *target, struct bio *bio, uint64_t pbn)
+{
+    int offset;
+    offset = sector_div(bio->bi_iter.bi_sector, target->sectors_per_block);
+    bio->bi_iter.bi_sector = (sector_t)pbn * target->sectors_per_block + offset;
+    do_io_remap_device(target, bio);
+}
+
+static uint64_t bio_lbn(struct dedup_target *target, struct bio *bio)
+{
+    sector_t lbn = bio->bi_iter.bi_sector;
+
+    sector_div(lbn, target->sectors_per_block);
+    return lbn;
+}
+
+static void bio_zero_endio(struct bio *bio)
+{
+    zero_fill_bio(bio);
+    bio->bi_status = BLK_STS_OK;
+    bio_endio(bio);
+}
+
 static int process_read(struct dedup_target *target, struct bio *bio)
 {
+    uint64_t lbn, pbn;
+    struct bio *clone;
     int ret;
-    pr_info("process_read: read called\n");
-    bio_set_dev(bio, target->dev->bdev);
-    pr_info("process_read: submitting sub_bio\n");
+    lbn = bio_lbn(target, bio);
 
-    submit_bio_noacct(bio);
-    pr_info("process_read: bio passed \n");
+    pr_info("process_read: lbn is = %llu\n", lbn);
 
-    return ret;
+    if (lbn_pbn_get(target->lbn_pbn, lbn, &pbn))
+    {
+        pr_info("process_read: doing io at pbn = %llu\n", pbn);
+        do_io(target, bio, pbn);
+    }
+    else
+    {
+        pr_info("process_read: lbn-> pbn not found, zero out bio\n");
+        bio_zero_endio(bio);
+    }
+    return 0;
 }
 
 static int compute_bio_hash(struct bio *bio, u64 *hash)
@@ -88,54 +127,226 @@ static int compute_bio_hash(struct bio *bio, u64 *hash)
     return 0;
 }
 
-static int process_write(struct dedup_target *target, struct bio *bio)
+// TODO: lbn_present and lbn_not present functions are almost exactly the same, fix
+static int write_hash_present_lbn_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t old_pbn, uint64_t new_pbn)
 {
-    u64 hash;
-    int ret;
-    pr_info("process_write: read called\n");
-    int r = compute_bio_hash(bio, &hash);
-    if (r)
+    int err;
+    if (old_pbn == new_pbn)
+        return 0;
+    err = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
+    // TODO: dec_refcount(old_pbn)
+    // TODO: inc refcount(new_pbn)
+    if (err)
     {
-        pr_err("process_write: couldn't calculatere hash for the bio\n");
+        pr_info("write_hash_present_lbn_present: couldn't insert into lbn, pbn mapping\n");
     }
     else
     {
-        pr_info("process_write: hash for bio is %llu\n", hash);
+        pr_info("write_hash_present_lbn_present: pbn overwritten\n");
     }
-    bio_set_dev(bio, target->dev->bdev);
-    pr_info("process_write: submitting sub_bio\n");
 
-    submit_bio_noacct(bio);
+    bio->bi_status = BLK_STS_OK;
+    bio_endio(bio);
+    return DM_MAPIO_SUBMITTED;
+}
+
+static int write_hash_present_lbn_not_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t new_pbn)
+{
+
+    /*currently impossible*/
+    pr_info("write_hash_present_lbn_not_present: somwehow called INVESTIGATE\n");
+    int err;
+    err = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
+    // TODO: inc refcount(new_pbn)
+    if (err)
+    {
+        pr_info("write_hash_present_lbn_present: couldn't insert into lbn, pbn mapping\n");
+    }
+    else
+    {
+        pr_info("write_hash_present_lbn_present: pbn written???????????????????????\n");
+    }
+
+    bio->bi_status = BLK_STS_OK;
+    bio_endio(bio);
+    return err;
+    /*currently impossible*/
+}
+// TODO: process hash collisions
+static int write_hash_present(struct dedup_target *target, struct bio *bio, uint64_t hash, uint64_t lbn, uint64_t *pbns, uint32_t pbns_len)
+{
+    sector_t old_pbn; // pbn mapped to the passes lbn value in lbn_pbn_memtable (might not exist)
+    int err;
+    pr_info("write_hash_present: writing (possible) duplicate with lbn = %llu, pbn = %llu, hash=%llu\n", lbn, pbns[0], hash);
+
+    // TODO: processing possible hash collision:
+    // read chunk from pbn
+    // compare with chunk in bio
+
+    if (lbn_pbn_get(target->lbn_pbn, lbn, &old_pbn))
+    {
+        pr_info("write_hash_present: lbn present\n:");
+        err = write_hash_present_lbn_present(target, bio, lbn, old_pbn, pbns[0]);
+    }
+    else
+    {
+        pr_info("write_hash_present: lbn not present\n:");
+        err = write_hash_present_lbn_not_present(target, bio, lbn, pbns[0]);
+    }
+    return err;
+}
+
+// TODO: lbn_present and lbn_not present functions are almost exactly the same, fix
+static int write_hash_not_present_lbn_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t old_pbn, uint64_t hash)
+{
+    int ret;
+    uint64_t new_pbn;
+    ret = alloc_pbn(target->manager, &new_pbn); // creates with refcount 1
+    if (ret)
+        return ret;
+    pr_info("write_hash_not_present_lbn_not_present: allocate pbn = %llu\n", new_pbn);
+
+    ret = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
+    if (ret)
+        goto lbn_insert_fail;
+
+    ret = hash_pbn_add(target->hash_pbn, hash, new_pbn);
+    if (ret)
+        goto hash_insert_fail;
+
+    pr_info("write_hash_not_present_lbn_not_present: ret is %d\n", ret);
+    pr_info("write_hash_not_present_lbn_not_present: doing io\n");
+
+    ret = dec_refcount(target->manager, old_pbn);
+    if(ret)
+        pr_info("REFCOUNT FAILS SOMEHOW\n");
+
+    do_io(target, bio, new_pbn);
+    return DM_MAPIO_SUBMITTED;
+
+hash_insert_fail:
+    lbn_pbn_remove(target->lbn_pbn, lbn);
+lbn_insert_fail:
+    dec_refcount(target->manager, new_pbn);
     return ret;
+}
+
+static int write_hash_not_present_lbn_not_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t hash)
+{
+    int ret;
+    uint64_t new_pbn;
+    ret = alloc_pbn(target->manager, &new_pbn); // creates with refcount 1
+    if (ret)
+        return ret;
+    pr_info("write_hash_not_present_lbn_not_present: allocate pbn = %llu\n", new_pbn);
+
+    ret = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
+    if (ret)
+        goto lbn_insert_fail;
+
+    ret = hash_pbn_add(target->hash_pbn, hash, new_pbn);
+    if (ret)
+        goto hash_insert_fail;
+
+    pr_info("write_hash_not_present_lbn_not_present: ret is %d\n", ret);
+    pr_info("write_hash_not_present_lbn_not_present: doing io\n");
+    do_io(target, bio, new_pbn);
+    return DM_MAPIO_SUBMITTED;
+
+hash_insert_fail:
+    lbn_pbn_remove(target->lbn_pbn, lbn);
+lbn_insert_fail:
+    dec_refcount(target->manager, new_pbn);
+    return ret;
+}
+
+static int write_hash_not_present(struct dedup_target *target, struct bio *bio, uint64_t hash, uint64_t lbn)
+{
+    sector_t old_pbn; // pbn mapped to the passes lbn value in lbn_pbn_memtable (might not exist)
+    int err;
+    pr_info("write_hash_not_present: writing new chunk with lbn = %llu, hash=%llu\n", lbn, hash);
+    // TODO: processing possible hash collision:
+    // read chunk from pbn
+    // compare with chunk in bio
+
+    if (lbn_pbn_get(target->lbn_pbn, lbn, &old_pbn))
+    {
+        pr_info("write_hash_not_present: lbn present\n:");
+        err = write_hash_not_present_lbn_present(target, bio, lbn, old_pbn, hash);
+    }
+    else
+    {
+        pr_info("write_hash_not_present: lbn not present\n");
+        err = write_hash_not_present_lbn_not_present(target, bio, lbn, hash);
+    }
+    pr_info("write_hash_not_present: err is %d\n", err);
+    return err;
+}
+
+static int process_write(struct dedup_target *target, struct bio *bio)
+{
+    uint64_t hash, lbn;
+    sector_t *pbns; // TODO: currently doesn't support hash collision processing
+    int pbns_len;
+
+    pr_info("process_write: called\n");
+    int err = compute_bio_hash(bio, &hash);
+    if (err)
+    {
+        pr_err("process_write: couldn't calculatere hash for the bio\n");
+        return err;
+    }
+    pr_info("process_write: hash for bio is %llu\n", hash);
+
+    lbn = bio_lbn(target, bio);
+
+    pr_info("process_write: lbn is = %llu\n", lbn);
+
+    if (hash_pbn_get(target->hash_pbn, hash, &pbns, &pbns_len))
+    {
+        pr_info("process_write: hash present going to write_hash_present\n");
+        err = write_hash_present(target, bio, hash, lbn, pbns, pbns_len);
+    }
+    else
+    {
+        pr_info("process_write: hash not present going to write_hash_not_present\n");
+        err = write_hash_not_present(target, bio, hash, lbn);
+    }
+    if (err)
+        return err;
+    return 0;
 }
 static int process_bio(struct dedup_target *target, struct bio *bio)
 {
-    pr_info("dedup_target_map: mapping bio, bio_op=%d\n", bio_op(bio));
+    pr_info("process_bio: processing bio, bio_op=%d\n", bio_op(bio));
     int res;
 
+    // TODO: add discard processing
     if (bio_op(bio) != REQ_OP_READ && bio_op(bio) != REQ_OP_WRITE)
     {
         bio_set_dev(bio, target->dev->bdev);
-        pr_info("dedup_target_map: Passing through non-read/write bio\n");
+        pr_info("process_bio: Passing through non-read/write bio\n");
         return DM_MAPIO_REMAPPED;
     }
 
     if (bio_op(bio) == REQ_OP_WRITE)
     {
+        pr_info("procec_bio: write request\n");
         res = process_write(target, bio);
         if (res != DM_MAPIO_SUBMITTED)
         {
-            pr_err("dedup_target_map: Write bio processing failed, returning DM_MAPIO_KILL\n");
+            pr_err("process_bio: Write bio processing failed, returning DM_MAPIO_KILL\n");
             return DM_MAPIO_KILL;
         }
         return DM_MAPIO_SUBMITTED;
     }
     else
     {
+        pr_info("procec_bio: read request\n");
         res = process_read(target, bio);
         if (res != DM_MAPIO_SUBMITTED)
         {
-            pr_err("dedup_target_map: Read bio processing failed, returning DM_MAPIO_KILL\n");
+            pr_err("process_bio: Read bio processing failed, returning DM_MAPIO_KILL\n");
             return DM_MAPIO_KILL;
         }
         return DM_MAPIO_SUBMITTED;
@@ -193,6 +404,7 @@ static int dedup_target_ctr(struct dm_target *ti, unsigned int argc, char **argv
     target = kzalloc(sizeof(*target), GFP_KERNEL);
     if (!target)
         goto no_mem_for_target;
+    target->sectors_per_block = to_sector(CHUNK_SIZE);
 
     ret = bioset_init(&target->bs, 128, 0, BIOSET_NEED_BVECS);
     if (ret)
@@ -242,6 +454,12 @@ static int dedup_target_ctr(struct dm_target *ti, unsigned int argc, char **argv
         goto cant_create_workpool;
     }
     pr_info("dedup_target_ctr: workpool create\n");
+    target->manager = create_pbn_manager(ti->begin, ti->len); // TODO: is begine really needed?
+    if (!target->manager)
+        goto all_uninit;
+    ret = dm_set_target_max_io_len(ti, target->sectors_per_block);
+    if (ret)
+        goto all_uninit;
     ti->private = target;
     pr_info("dedup_target_ctr: out\n");
     return 0;
@@ -282,7 +500,16 @@ cant_create_workpool:
     bioset_exit(&(target->bs));
     destroy_workqueue(target->wq);
     kfree(target);
-    pr_err("dedup_target_ctr: Couldn't allocate index structures\n");
+    pr_err("dedup_target_ctr: Couldn't create workpool\n");
+    return -ENOMEM;
+all_uninit:
+    free_hash_pbn(target->hash_pbn);
+    free_lbn_pbn(target->lbn_pbn);
+    bioset_exit(&(target->bs));
+    destroy_workqueue(target->wq);
+    mempool_destroy(target->work_pool);
+    kfree(target);
+    pr_err("dedup_target_ctr: Couldn't create pbn_manage`r\n");
     return -ENOMEM;
 }
 
@@ -333,4 +560,4 @@ module_exit(dedup_exit);
 MODULE_AUTHOR("Egor Shalashnov <shalasheg@gmail.com>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Deduplication driver");
-MODULE_SOFTDEP("pre: dm-bufio");
+// MODULE_SOFTDEP("pre: dm-bufio");

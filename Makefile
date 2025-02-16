@@ -1,4 +1,4 @@
-obj-m += main.o index/memtable.o
+obj-m += main.o index/memtable.o index/pbn_manager.o
 
 KDIR:= /lib/modules/$(shell uname -r)/build
 

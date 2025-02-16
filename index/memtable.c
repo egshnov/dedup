@@ -1,7 +1,8 @@
 #include "memtable.h"
 #include <linux/slab.h>
 
-struct hash_pbn_node {
+struct hash_pbn_node
+{
     struct rb_node node;
     hash_t hash;
     sector_t *pbns;
@@ -21,8 +22,8 @@ static struct hash_pbn_node *create_hash_pbn_node(hash_t hash, sector_t pbn)
     node->hash = hash;
     node->pbns[0] = pbn;
 
-    pr_info("create_hash_pbn_node: Created node for hash %llu with pbn %llu\n",
-            (unsigned long long)hash, (unsigned long long)pbn);
+    // pr_info("create_hash_pbn_node: Created node for hash %llu with pbn %llu\n",
+    //         (unsigned long long)hash, (unsigned long long)pbn);
 
     return node;
 dealloc:
@@ -44,21 +45,23 @@ static int compare_hash(hash_t lhs, hash_t rhs)
 static struct hash_pbn_node *__hash_pbn_underlying_search(struct rb_root *root, hash_t hash)
 {
     struct rb_node *node = root->rb_node;
-    while (node) {
+    while (node)
+    {
         struct hash_pbn_node *data = rb_entry(node, struct hash_pbn_node, node);
         int res = compare_hash(hash, data->hash);
         if (res < 0)
             node = node->rb_left;
         else if (res > 0)
             node = node->rb_right;
-        else {
-            pr_info("__hash_pbn_underlying_search: Found node for hash %llu\n",
-                    (unsigned long long)hash);
+        else
+        {
+            // pr_info("__hash_pbn_underlying_search: Found node for hash %llu\n",
+            //         (unsigned long long)hash);
             return data;
         }
     }
-    pr_info("__hash_pbn_underlying_search: No node found for hash %llu\n",
-            (unsigned long long)hash);
+    // pr_info("__hash_pbn_underlying_search: No node found for hash %llu\n",
+            // (unsigned long long)hash);
     return NULL;
 }
 
@@ -68,7 +71,8 @@ static int __hash_pbn_underlying_insert(struct rb_root *root, hash_t hash, secto
     struct hash_pbn_node *this;
     int res;
 
-    while (*new) {
+    while (*new)
+    {
         this = rb_entry(*new, struct hash_pbn_node, node);
         res = compare_hash(hash, this->hash);
         parent = *new;
@@ -76,19 +80,21 @@ static int __hash_pbn_underlying_insert(struct rb_root *root, hash_t hash, secto
             new = &((*new)->rb_left);
         else if (res > 0)
             new = &((*new)->rb_right);
-        else {
+        else
+        {
             this->pbns_len++;
             sector_t *dummy = krealloc(this->pbns, sizeof(*this->pbns) * this->pbns_len, GFP_KERNEL);
-            if (!dummy) {
+            if (!dummy)
+            {
                 this->pbns_len--;
-                pr_err("__hash_pbn_underlying_insert: krealloc failed for hash %llu\n",
-                       (unsigned long long)hash);
+                // pr_err("__hash_pbn_underlying_insert: krealloc failed for hash %llu\n",
+                //        (unsigned long long)hash);
                 goto no_mem;
             }
             this->pbns = dummy;
             this->pbns[this->pbns_len - 1] = pbn;
-            pr_info("__hash_pbn_underlying_insert: Updated node for hash %llu, new pbns_len=%d\n",
-                    (unsigned long long)hash, this->pbns_len);
+            //pr_info("__hash_pbn_underlying_insert: Updated node for hash %llu, new pbns_len=%d\n",
+                    // (unsigned long long)hash, this->pbns_len);
             return sizeof(pbn);
         }
     }
@@ -97,7 +103,7 @@ static int __hash_pbn_underlying_insert(struct rb_root *root, hash_t hash, secto
         goto no_mem;
     rb_link_node(&data->node, parent, new);
     rb_insert_color(&data->node, root);
-    pr_info("__hash_pbn_underlying_insert: Inserted new node for hash %llu\n", (unsigned long long)hash);
+    //pr_info("__hash_pbn_underlying_insert: Inserted new node for hash %llu\n", (unsigned long long)hash);
     return sizeof(struct hash_pbn_node);
 no_mem:
     return -ENOMEM;
@@ -109,7 +115,7 @@ struct hash_pbn_memtable *create_hash_pbn()
     if (!new_table)
         return NULL;
     new_table->root = RB_ROOT;
-    pr_info("create_hash_pbn: Created hash_pbn_memtable\n");
+    //pr_info("create_hash_pbn: Created hash_pbn_memtable\n");
     return new_table;
 }
 
@@ -118,8 +124,9 @@ void free_hash_pbn(struct hash_pbn_memtable *table)
     if (!table)
         return;
     struct hash_pbn_node *pos, *node;
-    rbtree_postorder_for_each_entry_safe(pos, node, &table->root, node) {
-        pr_info("free_hash_pbn: Freeing node for hash %llu\n", (unsigned long long)pos->hash);
+    rbtree_postorder_for_each_entry_safe(pos, node, &table->root, node)
+    {
+        //pr_info("free_hash_pbn: Freeing node for hash %llu\n", (unsigned long long)pos->hash);
         free_hash_pbn_node(pos);
     }
     kfree(table);
@@ -127,20 +134,21 @@ void free_hash_pbn(struct hash_pbn_memtable *table)
 
 int hash_pbn_add(struct hash_pbn_memtable *table, hash_t hash, sector_t pbn)
 {
-    return __hash_pbn_underlying_insert(&table->root, hash, pbn);
+    return __hash_pbn_underlying_insert(&table->root, hash, pbn) <0;
 }
 
 bool hash_pbn_get(struct hash_pbn_memtable *table, hash_t hash, sector_t **res, int *len)
 {
     struct hash_pbn_node *target = __hash_pbn_underlying_search(&table->root, hash);
-    if (target) {
+    if (target)
+    {
         *len = target->pbns_len;
         *res = kzalloc((*len) * sizeof(sector_t), GFP_KERNEL);
         if (!*res)
             goto no_mem;
         memcpy(*res, target->pbns, sizeof(sector_t) * (*len));
-        pr_info("hash_pbn_get: Found node for hash %llu with %d pbns\n",
-                (unsigned long long)hash, *len);
+        //pr_info("hash_pbn_get: Found node for hash %llu with %d pbns\n",
+          //      (unsigned long long)hash, *len);
         return true;
     }
     return false;
@@ -151,7 +159,8 @@ no_mem:
     return false;
 }
 
-struct lbn_pbn_node {
+struct lbn_pbn_node
+{
     struct rb_node node;
     sector_t lbn;
     sector_t pbn;
@@ -164,8 +173,8 @@ static struct lbn_pbn_node *create_lbn_pbn_node(sector_t lbn, sector_t pbn)
         return NULL;
     node->lbn = lbn;
     node->pbn = pbn;
-    pr_info("create_lbn_pbn_node: Created node for lbn %llu with pbn %llu\n",
-            (unsigned long long)lbn, (unsigned long long)pbn);
+    // pr_info("create_lbn_pbn_node: Created node for lbn %llu with pbn %llu\n",
+    //         (unsigned long long)lbn, (unsigned long long)pbn);
     return node;
 }
 
@@ -182,19 +191,21 @@ static int compare_lbns(sector_t lhs, sector_t rhs)
 static struct lbn_pbn_node *__lbn_pbn_underlying_search(struct rb_root *root, sector_t lbn)
 {
     struct rb_node *node = root->rb_node;
-    while (node) {
+    while (node)
+    {
         struct lbn_pbn_node *data = rb_entry(node, struct lbn_pbn_node, node);
         int res = compare_lbns(lbn, data->lbn);
         if (res < 0)
             node = node->rb_left;
         else if (res > 0)
             node = node->rb_right;
-        else {
-            pr_info("__lbn_pbn_underlying_search: Found node for lbn %llu\n", (unsigned long long)lbn);
+        else
+        {
+            // pr_info("__lbn_pbn_underlying_search: Found node for lbn %llu\n", (unsigned long long)lbn);
             return data;
         }
     }
-    pr_info("__lbn_pbn_underlying_search: No node found for lbn %llu\n", (unsigned long long)lbn);
+    // pr_info("__lbn_pbn_underlying_search: No node found for lbn %llu\n", (unsigned long long)lbn);
     return NULL;
 }
 
@@ -204,7 +215,8 @@ static int __lbn_pbn_underlying_insert(struct rb_root *root, sector_t lbn, secto
     struct lbn_pbn_node *this;
     int res;
 
-    while (*new) {
+    while (*new)
+    {
         this = rb_entry(*new, struct lbn_pbn_node, node);
         res = compare_lbns(lbn, this->lbn);
         parent = *new;
@@ -212,9 +224,10 @@ static int __lbn_pbn_underlying_insert(struct rb_root *root, sector_t lbn, secto
             new = &((*new)->rb_left);
         else if (res > 0)
             new = &((*new)->rb_right);
-        else {
-            pr_info("__lbn_pbn_underlying_insert: Updating node for lbn %llu with new pbn %llu\n",
-                    (unsigned long long)lbn, (unsigned long long)pbn);
+        else
+        {
+            // pr_info("__lbn_pbn_underlying_insert: Updating node for lbn %llu with new pbn %llu\n",
+                    // (unsigned long long)lbn, (unsigned long long)pbn);
             this->pbn = pbn;
             return 0;
         }
@@ -224,8 +237,8 @@ static int __lbn_pbn_underlying_insert(struct rb_root *root, sector_t lbn, secto
         goto no_mem;
     rb_link_node(&data->node, parent, new);
     rb_insert_color(&data->node, root);
-    pr_info("__lbn_pbn_underlying_insert: Inserted new node for lbn %llu with pbn %llu\n",
-            (unsigned long long)lbn, (unsigned long long)pbn);
+    // pr_info("__lbn_pbn_underlying_insert: Inserted new node for lbn %llu with pbn %llu\n",
+    //         (unsigned long long)lbn, (unsigned long long)pbn);
     return 0;
 no_mem:
     return -ENOMEM;
@@ -237,7 +250,7 @@ struct lbn_pbn_memtable *create_lbn_pbn()
     if (!new_table)
         return NULL;
     new_table->root = RB_ROOT;
-    pr_info("create_lbn_pbn: Created lbn_pbn_memtable\n");
+    // pr_info("create_lbn_pbn: Created lbn_pbn_memtable\n");
     return new_table;
 }
 
@@ -246,8 +259,9 @@ void free_lbn_pbn(struct lbn_pbn_memtable *table)
     if (!table)
         return;
     struct lbn_pbn_node *pos, *node;
-    rbtree_postorder_for_each_entry_safe(pos, node, &table->root, node) {
-        pr_info("free_lbn_pbn: Freeing node for lbn %llu\n", (unsigned long long)pos->lbn);
+    rbtree_postorder_for_each_entry_safe(pos, node, &table->root, node)
+    {
+        // pr_info("free_lbn_pbn: Freeing node for lbn %llu\n", (unsigned long long)pos->lbn);
         free_lbn_pbn_node(pos);
     }
     kfree(table);
@@ -261,12 +275,23 @@ int lbn_pbn_insert(struct lbn_pbn_memtable *table, sector_t lbn, sector_t pbn)
 bool lbn_pbn_get(struct lbn_pbn_memtable *table, sector_t lbn, sector_t *res_pbn)
 {
     struct lbn_pbn_node *target = __lbn_pbn_underlying_search(&table->root, lbn);
-    if (target) {
+    if (target)
+    {
         *res_pbn = target->pbn;
-        pr_info("lbn_pbn_get: Found mapping: lbn %llu -> pbn %llu\n",
-                (unsigned long long)lbn, (unsigned long long)target->pbn);
+        // pr_info("lbn_pbn_get: Found mapping: lbn %llu -> pbn %llu\n",
+        //         (unsigned long long)lbn, (unsigned long long)target->pbn);
         return true;
     }
-    pr_info("lbn_pbn_get: No mapping found for lbn %llu\n", (unsigned long long)lbn);
+    // pr_info("lbn_pbn_get: No mapping found for lbn %llu\n", (unsigned long long)lbn);
     return false;
+}
+
+void lbn_pbn_remove(struct lbn_pbn_memtable *table, sector_t lbn)
+{
+    struct lbn_pbn_node *data = __lbn_pbn_underlying_search(&table->root, lbn);
+    if (data)
+    {
+        rb_erase(&data->node, &table->root);
+        free_lbn_pbn_node(data);
+    }
 }

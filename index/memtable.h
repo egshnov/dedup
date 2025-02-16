@@ -1,9 +1,8 @@
+#ifndef DEDUP_MEMTBL_H
+#define DEDUP_MEMTBL_H
 #include <linux/types.h>
 #include <linux/rbtree.h>
 #include <linux/list.h>
-
-#ifndef DEDUP_MEMTBL_H
-#define DEDUP_MEMTBL_H
 
 typedef uint64_t hash_t;
 
@@ -17,14 +16,14 @@ struct hash_pbn_memtable *create_hash_pbn(void);
 
 void free_hash_pbn(struct hash_pbn_memtable *table);
 
-/* 
-    if entry with such hash already exists add pbn to the end of the array 
-    returns amount of allocated bytes 
+/*
+    if entry with such hash already exists add pbn to the end of the array
+    returns amount of allocated bytes
     returns <0 on error
 */
 int hash_pbn_add(struct hash_pbn_memtable *table, hash_t hash, sector_t pbn);
 
-/*  
+/*
     returns true if found entry with such hash
     array of pbns is copied into res
     sets len = -1 if couldn't allocate space for pbns
@@ -32,7 +31,7 @@ int hash_pbn_add(struct hash_pbn_memtable *table, hash_t hash, sector_t pbn);
 bool hash_pbn_get(struct hash_pbn_memtable *table, hash_t hash, sector_t **res, int *res_len);
 
 /*rb_tree that stores lbn->pbn entries*/
-//TODO: change to using xarray
+// TODO: change to using xarray
 struct lbn_pbn_memtable
 {
     struct rb_root root;
@@ -49,4 +48,5 @@ int lbn_pbn_insert(struct lbn_pbn_memtable *table, sector_t lbn, sector_t pbn);
     pbn is stored in res*/
 bool lbn_pbn_get(struct lbn_pbn_memtable *table, sector_t lbn, sector_t *res_pbn);
 
+void lbn_pbn_remove(struct lbn_pbn_memtable *table, sector_t lbn);
 #endif

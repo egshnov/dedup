@@ -10,6 +10,6 @@ ccflags-y := 	-Wall					\
 		-Werror=implicit-function-declaration	
 
 
-dedup-y := main.o index/memtable.o
+dedup-y := main.o index/memtable.o index/pbn_manager.o
 
 obj-m := dedup.o
