@@ -127,160 +127,81 @@ static int compute_bio_hash(struct bio *bio, u64 *hash)
     return 0;
 }
 
-// TODO: lbn_present and lbn_not present functions are almost exactly the same, fix
-static int write_hash_present_lbn_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t old_pbn, uint64_t new_pbn)
-{
-    int err;
-    if (old_pbn == new_pbn)
-        return 0;
-    err = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
-    // TODO: dec_refcount(old_pbn)
-    // TODO: inc refcount(new_pbn)
-    if (err)
-    {
-        pr_info("write_hash_present_lbn_present: couldn't insert into lbn, pbn mapping\n");
-    }
-    else
-    {
-        pr_info("write_hash_present_lbn_present: pbn overwritten\n");
-    }
-
-    bio->bi_status = BLK_STS_OK;
-    bio_endio(bio);
-    return DM_MAPIO_SUBMITTED;
-}
-
-static int write_hash_present_lbn_not_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t new_pbn)
-{
-
-    /*currently impossible*/
-    pr_info("write_hash_present_lbn_not_present: somwehow called INVESTIGATE\n");
-    int err;
-    err = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
-    // TODO: inc refcount(new_pbn)
-    if (err)
-    {
-        pr_info("write_hash_present_lbn_present: couldn't insert into lbn, pbn mapping\n");
-    }
-    else
-    {
-        pr_info("write_hash_present_lbn_present: pbn written???????????????????????\n");
-    }
-
-    bio->bi_status = BLK_STS_OK;
-    bio_endio(bio);
-    return err;
-    /*currently impossible*/
-}
-// TODO: process hash collisions
+// TODO: process possible hash collisions
 static int write_hash_present(struct dedup_target *target, struct bio *bio, uint64_t hash, uint64_t lbn, uint64_t *pbns, uint32_t pbns_len)
 {
-    sector_t old_pbn; // pbn mapped to the passes lbn value in lbn_pbn_memtable (might not exist)
     int err;
-    pr_info("write_hash_present: writing (possible) duplicate with lbn = %llu, pbn = %llu, hash=%llu\n", lbn, pbns[0], hash);
+    uint64_t old_pbn;
+    bool lbn_present = lbn_pbn_get(target->lbn_pbn, lbn, &old_pbn);
+    if (lbn_present && old_pbn == pbns[0])
+        goto out;
 
-    // TODO: processing possible hash collision:
-    // read chunk from pbn
-    // compare with chunk in bio
+    err = lbn_pbn_insert(target->lbn_pbn, lbn, pbns[0]);
+    if (err)
+        goto cant_insert;
 
-    if (lbn_pbn_get(target->lbn_pbn, lbn, &old_pbn))
+    err = inc_refcount(target->manager, pbns[0]);
+    if (err)
+        goto cant_inc_refcount;
+
+    if (lbn_present)
     {
-        pr_info("write_hash_present: lbn present\n:");
-        err = write_hash_present_lbn_present(target, bio, lbn, old_pbn, pbns[0]);
+        err = dec_refcount(target->manager, old_pbn);
+        if (err)
+        {
+            pr_err("REFCOUNT WONT DECREASE INVESTIGATE!!!!!!!!!!!");
+        }
     }
-    else
-    {
-        pr_info("write_hash_present: lbn not present\n:");
-        err = write_hash_present_lbn_not_present(target, bio, lbn, pbns[0]);
-    }
-    return err;
-}
 
-// TODO: lbn_present and lbn_not present functions are almost exactly the same, fix
-static int write_hash_not_present_lbn_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t old_pbn, uint64_t hash)
-{
-    int ret;
-    uint64_t new_pbn;
-    ret = alloc_pbn(target->manager, &new_pbn); // creates with refcount 1
-    if (ret)
-        return ret;
-    pr_info("write_hash_not_present_lbn_not_present: allocate pbn = %llu\n", new_pbn);
-
-    ret = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
-    if (ret)
-        goto lbn_insert_fail;
-
-    ret = hash_pbn_add(target->hash_pbn, hash, new_pbn);
-    if (ret)
-        goto hash_insert_fail;
-
-    pr_info("write_hash_not_present_lbn_not_present: ret is %d\n", ret);
-    pr_info("write_hash_not_present_lbn_not_present: doing io\n");
-
-    ret = dec_refcount(target->manager, old_pbn);
-    if(ret)
-        pr_info("REFCOUNT FAILS SOMEHOW\n");
-
-    do_io(target, bio, new_pbn);
+out:
+    bio->bi_status = BLK_STS_OK;
+    bio_endio(bio);
     return DM_MAPIO_SUBMITTED;
+cant_insert:
+    return DM_MAPIO_KILL;
 
-hash_insert_fail:
+cant_inc_refcount:
     lbn_pbn_remove(target->lbn_pbn, lbn);
-lbn_insert_fail:
-    dec_refcount(target->manager, new_pbn);
-    return ret;
-}
-
-static int write_hash_not_present_lbn_not_present(struct dedup_target *target, struct bio *bio, uint64_t lbn, uint64_t hash)
-{
-    int ret;
-    uint64_t new_pbn;
-    ret = alloc_pbn(target->manager, &new_pbn); // creates with refcount 1
-    if (ret)
-        return ret;
-    pr_info("write_hash_not_present_lbn_not_present: allocate pbn = %llu\n", new_pbn);
-
-    ret = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
-    if (ret)
-        goto lbn_insert_fail;
-
-    ret = hash_pbn_add(target->hash_pbn, hash, new_pbn);
-    if (ret)
-        goto hash_insert_fail;
-
-    pr_info("write_hash_not_present_lbn_not_present: ret is %d\n", ret);
-    pr_info("write_hash_not_present_lbn_not_present: doing io\n");
-    do_io(target, bio, new_pbn);
-    return DM_MAPIO_SUBMITTED;
-
-hash_insert_fail:
-    lbn_pbn_remove(target->lbn_pbn, lbn);
-lbn_insert_fail:
-    dec_refcount(target->manager, new_pbn);
-    return ret;
+    return DM_MAPIO_KILL;
 }
 
 static int write_hash_not_present(struct dedup_target *target, struct bio *bio, uint64_t hash, uint64_t lbn)
 {
-    sector_t old_pbn; // pbn mapped to the passes lbn value in lbn_pbn_memtable (might not exist)
-    int err;
-    pr_info("write_hash_not_present: writing new chunk with lbn = %llu, hash=%llu\n", lbn, hash);
-    // TODO: processing possible hash collision:
-    // read chunk from pbn
-    // compare with chunk in bio
+    sector_t old_pbn, new_pbn; // pbn mapped to the passes lbn value in lbn_pbn_memtable (might not exist)
+    int ret;
 
-    if (lbn_pbn_get(target->lbn_pbn, lbn, &old_pbn))
+    pr_info("write_hash_not_present: writing new chunk with lbn = %llu, hash=%llu\n", lbn, hash);
+
+    bool lbn_present = lbn_pbn_get(target->lbn_pbn, lbn, &old_pbn);
+    ret = alloc_pbn(target->manager, &new_pbn); // creates with refcount 1
+    if (ret)
+        return ret;
+
+    pr_info("write_hash_not_present: allocated pbn = %llu\n", new_pbn);
+
+    ret = lbn_pbn_insert(target->lbn_pbn, lbn, new_pbn);
+    if (ret)
+        goto lbn_insert_fail;
+
+    ret = hash_pbn_add(target->hash_pbn, hash, new_pbn);
+    if (ret)
+        goto hash_insert_fail;
+
+    if (lbn_present)
     {
-        pr_info("write_hash_not_present: lbn present\n:");
-        err = write_hash_not_present_lbn_present(target, bio, lbn, old_pbn, hash);
+        ret = dec_refcount(target->manager, old_pbn);
+        if (ret)
+            pr_info("REFCOUNT FAILS SOMEHOW INVESTIGATE\n"); // TODO: add propper exception
     }
-    else
-    {
-        pr_info("write_hash_not_present: lbn not present\n");
-        err = write_hash_not_present_lbn_not_present(target, bio, lbn, hash);
-    }
-    pr_info("write_hash_not_present: err is %d\n", err);
-    return err;
+
+    do_io(target, bio, new_pbn);
+    return DM_MAPIO_SUBMITTED;
+
+hash_insert_fail:
+    lbn_pbn_remove(target->lbn_pbn, lbn);
+lbn_insert_fail:
+    dec_refcount(target->manager, new_pbn);
+    return ret;
 }
 
 static int process_write(struct dedup_target *target, struct bio *bio)
@@ -304,7 +225,9 @@ static int process_write(struct dedup_target *target, struct bio *bio)
 
     if (hash_pbn_get(target->hash_pbn, hash, &pbns, &pbns_len))
     {
+        pr_info("process_write: found pbn = %llu\n", pbns[0]);
         pr_info("process_write: hash present going to write_hash_present\n");
+        // TODO: process hash collision here i guess?
         err = write_hash_present(target, bio, hash, lbn, pbns, pbns_len);
     }
     else
