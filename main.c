@@ -13,6 +13,7 @@
 #include <linux/highmem.h>
 #include <linux/kernel.h>
 #include <linux/dm-io.h>
+
 #include "index/memtable.h"
 #include "index/pbn_manager.h"
 
@@ -20,6 +21,12 @@
 #define CHUNK_SIZE 4096
 #define MIN_DEDUP_WORK_IO 16
 #define SECTOR_SHIFT 9 /* 512-byte sectors => shift by 9 */
+
+static struct dedup_stats
+{
+    uint64_t total_lbn;
+    uint64_t unique_pbn;
+} stats;
 
 /* Main structure for device mapper target */
 struct dedup_target
@@ -38,14 +45,12 @@ struct dedup_target
     struct workqueue_struct *wq;
     mempool_t *work_pool;
     struct bio_set bs;
-
-    /*stats*/
 };
 
-static void get_stats(struct dedup_target *target, uint64_t *total_lbn, uint64_t *unique_pbn)
+static void get_stats(struct dedup_target *target)
 {
-    *total_lbn = target->lbn_pbn->occupied_num;
-    *unique_pbn = target->manager->occupied_num;
+    stats.total_lbn = target->lbn_pbn->occupied_num;
+    stats.unique_pbn = target->manager->occupied_num;
 }
 
 struct dedup_work
@@ -241,11 +246,9 @@ static int process_write(struct dedup_target *target, struct bio *bio)
     if (err)
         return err;
 
-    uint64_t total_lbn;
-    uint64_t unique_pbn;
-    get_stats(target, &total_lbn, &unique_pbn);
-    pr_info("current stats: total_lbn = %llu unique_pbn = %llu\n", total_lbn, unique_pbn);
-    pr_info("saved space = %llu\n", (total_lbn - unique_pbn) * CHUNK_SIZE);
+    get_stats(target);
+    pr_info("current stats: total_lbn = %llu unique_pbn = %llu\n", stats.total_lbn, stats.unique_pbn);
+    pr_info("saved space = %llu\n", (stats.total_lbn - stats.unique_pbn) * CHUNK_SIZE);
     return 0;
 }
 static int process_bio(struct dedup_target *target, struct bio *bio)
@@ -485,6 +488,23 @@ static void dedup_exit(void)
     dm_unregister_target(&dedup_ops);
     pr_info("dedup_exit: Target unregistered\n");
 }
+
+static int dedup_param_get_stats(char *buf, const struct kernel_param *kp)
+{
+	char stats_buff[100];
+    int len = snprintf(stats_buff, sizeof(stats_buff), "%llu %llu\n", stats.total_lbn, stats.unique_pbn);
+    strcpy(buf, stats_buff);
+    return len;
+}
+
+static const struct kernel_param_ops get_stats_ops = {
+	.set = NULL,
+	.get = dedup_param_get_stats,
+};
+
+MODULE_PARM_DESC(get_stats, "Deduplication statisics in format 'total_lbn unique_pbn'");
+module_param_cb(get_stats, &get_stats_ops, NULL, S_IRUGO);
+
 
 module_init(dedup_init);
 module_exit(dedup_exit);
