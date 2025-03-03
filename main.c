@@ -21,8 +21,6 @@
 #define MIN_DEDUP_WORK_IO 16
 #define SECTOR_SHIFT 9 /* 512-byte sectors => shift by 9 */
 
-// TODO: cahnge bio_alloc_bioset to GFP_NOIO?
-
 /* Main structure for device mapper target */
 struct dedup_target
 {
@@ -40,7 +38,15 @@ struct dedup_target
     struct workqueue_struct *wq;
     mempool_t *work_pool;
     struct bio_set bs;
+
+    /*stats*/
 };
+
+static void get_stats(struct dedup_target *target, uint64_t *total_lbn, uint64_t *unique_pbn)
+{
+    *total_lbn = target->lbn_pbn->occupied_num;
+    *unique_pbn = target->manager->occupied_num;
+}
 
 struct dedup_work
 {
@@ -49,7 +55,7 @@ struct dedup_work
     struct bio *bio;
 };
 
-static void do_io_remap_device(struct dedup_target *target, struct bio *bio)
+static void remap_device(struct dedup_target *target, struct bio *bio)
 {
     bio_set_dev(bio, target->dev->bdev);
     submit_bio_noacct(bio);
@@ -60,7 +66,7 @@ static void do_io(struct dedup_target *target, struct bio *bio, uint64_t pbn)
     int offset;
     offset = sector_div(bio->bi_iter.bi_sector, target->sectors_per_block);
     bio->bi_iter.bi_sector = (sector_t)pbn * target->sectors_per_block + offset;
-    do_io_remap_device(target, bio);
+    remap_device(target, bio);
 }
 
 static uint64_t bio_lbn(struct dedup_target *target, struct bio *bio)
@@ -81,8 +87,6 @@ static void bio_zero_endio(struct bio *bio)
 static int process_read(struct dedup_target *target, struct bio *bio)
 {
     uint64_t lbn, pbn;
-    struct bio *clone;
-    int ret;
     lbn = bio_lbn(target, bio);
 
     pr_info("process_read: lbn is = %llu\n", lbn);
@@ -105,7 +109,6 @@ static int compute_bio_hash(struct bio *bio, u64 *hash)
     struct xxh64_state state;
     struct bio_vec bvec;
     struct bvec_iter iter;
-    unsigned long flags;
 
     xxh64_reset(&state, 0);
 
@@ -115,7 +118,7 @@ static int compute_bio_hash(struct bio *bio, u64 *hash)
 
         if (!data)
         {
-            pr_err("Failed to map bio segment\n");
+            pr_err("compute_bio_hash: Failed to map bio segment\n");
             return -EINVAL; // TODO: change error flag
         }
 
@@ -167,13 +170,13 @@ cant_inc_refcount:
 
 static int write_hash_not_present(struct dedup_target *target, struct bio *bio, uint64_t hash, uint64_t lbn)
 {
-    sector_t old_pbn, new_pbn; // pbn mapped to the passes lbn value in lbn_pbn_memtable (might not exist)
+    sector_t old_pbn, new_pbn; // pbn mapped to the passed lbn value in lbn_pbn_memtable (might not exist)
     int ret;
 
     pr_info("write_hash_not_present: writing new chunk with lbn = %llu, hash=%llu\n", lbn, hash);
 
     bool lbn_present = lbn_pbn_get(target->lbn_pbn, lbn, &old_pbn);
-    ret = alloc_pbn(target->manager, &new_pbn); // creates with refcount 1
+    ret = alloc_pbn(target->manager, &new_pbn); // creates with refcount 1s
     if (ret)
         return ret;
 
@@ -237,6 +240,12 @@ static int process_write(struct dedup_target *target, struct bio *bio)
     }
     if (err)
         return err;
+
+    uint64_t total_lbn;
+    uint64_t unique_pbn;
+    get_stats(target, &total_lbn, &unique_pbn);
+    pr_info("current stats: total_lbn = %llu unique_pbn = %llu\n", total_lbn, unique_pbn);
+    pr_info("saved space = %llu\n", (total_lbn - unique_pbn) * CHUNK_SIZE);
     return 0;
 }
 static int process_bio(struct dedup_target *target, struct bio *bio)

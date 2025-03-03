@@ -19,18 +19,13 @@ struct pbn_rb_node
     uint32_t refcount;
 };
 
-struct pbn_list_node
-{
-    uint64_t pbn;
-    struct list_head list;
-};
-
 struct pbn_manager
 {
     struct rb_root ref_root;
     uint64_t start_pbn;
     uint64_t len;
     uint64_t alloc_ptr;
+    uint64_t occupied_num;
 };
 
 struct pbn_manager *create_pbn_manager(uint64_t start_pbn, uint64_t last_pbn);

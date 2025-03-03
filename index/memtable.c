@@ -61,7 +61,7 @@ static struct hash_pbn_node *__hash_pbn_underlying_search(struct rb_root *root, 
         }
     }
     // pr_info("__hash_pbn_underlying_search: No node found for hash %llu\n",
-            // (unsigned long long)hash);
+    // (unsigned long long)hash);
     return NULL;
 }
 
@@ -93,8 +93,8 @@ static int __hash_pbn_underlying_insert(struct rb_root *root, hash_t hash, secto
             }
             this->pbns = dummy;
             this->pbns[this->pbns_len - 1] = pbn;
-            //pr_info("__hash_pbn_underlying_insert: Updated node for hash %llu, new pbns_len=%d\n",
-                    // (unsigned long long)hash, this->pbns_len);
+            // pr_info("__hash_pbn_underlying_insert: Updated node for hash %llu, new pbns_len=%d\n",
+            //  (unsigned long long)hash, this->pbns_len);
             return sizeof(pbn);
         }
     }
@@ -103,7 +103,7 @@ static int __hash_pbn_underlying_insert(struct rb_root *root, hash_t hash, secto
         goto no_mem;
     rb_link_node(&data->node, parent, new);
     rb_insert_color(&data->node, root);
-    //pr_info("__hash_pbn_underlying_insert: Inserted new node for hash %llu\n", (unsigned long long)hash);
+    // pr_info("__hash_pbn_underlying_insert: Inserted new node for hash %llu\n", (unsigned long long)hash);
     return sizeof(struct hash_pbn_node);
 no_mem:
     return -ENOMEM;
@@ -115,7 +115,7 @@ struct hash_pbn_memtable *create_hash_pbn()
     if (!new_table)
         return NULL;
     new_table->root = RB_ROOT;
-    //pr_info("create_hash_pbn: Created hash_pbn_memtable\n");
+    // pr_info("create_hash_pbn: Created hash_pbn_memtable\n");
     return new_table;
 }
 
@@ -126,7 +126,7 @@ void free_hash_pbn(struct hash_pbn_memtable *table)
     struct hash_pbn_node *pos, *node;
     rbtree_postorder_for_each_entry_safe(pos, node, &table->root, node)
     {
-        //pr_info("free_hash_pbn: Freeing node for hash %llu\n", (unsigned long long)pos->hash);
+        // pr_info("free_hash_pbn: Freeing node for hash %llu\n", (unsigned long long)pos->hash);
         free_hash_pbn_node(pos);
     }
     kfree(table);
@@ -134,7 +134,7 @@ void free_hash_pbn(struct hash_pbn_memtable *table)
 
 int hash_pbn_add(struct hash_pbn_memtable *table, hash_t hash, sector_t pbn)
 {
-    return __hash_pbn_underlying_insert(&table->root, hash, pbn) <0;
+    return __hash_pbn_underlying_insert(&table->root, hash, pbn) < 0;
 }
 
 bool hash_pbn_get(struct hash_pbn_memtable *table, hash_t hash, sector_t **res, int *len)
@@ -147,8 +147,8 @@ bool hash_pbn_get(struct hash_pbn_memtable *table, hash_t hash, sector_t **res, 
         if (!*res)
             goto no_mem;
         memcpy(*res, target->pbns, sizeof(sector_t) * (*len));
-        //pr_info("hash_pbn_get: Found node for hash %llu with %d pbns\n",
-          //      (unsigned long long)hash, *len);
+        // pr_info("hash_pbn_get: Found node for hash %llu with %d pbns\n",
+        //       (unsigned long long)hash, *len);
         return true;
     }
     return false;
@@ -227,7 +227,7 @@ static int __lbn_pbn_underlying_insert(struct rb_root *root, sector_t lbn, secto
         else
         {
             // pr_info("__lbn_pbn_underlying_insert: Updating node for lbn %llu with new pbn %llu\n",
-                    // (unsigned long long)lbn, (unsigned long long)pbn);
+            // (unsigned long long)lbn, (unsigned long long)pbn);
             this->pbn = pbn;
             return 0;
         }
@@ -269,7 +269,10 @@ void free_lbn_pbn(struct lbn_pbn_memtable *table)
 
 int lbn_pbn_insert(struct lbn_pbn_memtable *table, sector_t lbn, sector_t pbn)
 {
-    return __lbn_pbn_underlying_insert(&table->root, lbn, pbn);
+    int ret = __lbn_pbn_underlying_insert(&table->root, lbn, pbn);
+    if (!ret)
+        table->occupied_num++;
+    return ret;
 }
 
 bool lbn_pbn_get(struct lbn_pbn_memtable *table, sector_t lbn, sector_t *res_pbn)
@@ -291,6 +294,7 @@ void lbn_pbn_remove(struct lbn_pbn_memtable *table, sector_t lbn)
     struct lbn_pbn_node *data = __lbn_pbn_underlying_search(&table->root, lbn);
     if (data)
     {
+        table->occupied_num--;
         rb_erase(&data->node, &table->root);
         free_lbn_pbn_node(data);
     }

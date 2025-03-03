@@ -30,13 +30,9 @@ static struct pbn_rb_node *pbn_rb_search(struct rb_root *root, uint64_t pbn)
         struct pbn_rb_node *data = rb_entry(node, struct pbn_rb_node, node);
         int res = compare_pbns(pbn, data->pbn);
         if (res < 0)
-        {
             node = node->rb_left;
-        }
         else if (res > 0)
-        {
             node = node->rb_right;
-        }
         else
         {
             return data;
@@ -61,7 +57,7 @@ static int pbn_rb_insert(struct rb_root *root, uint64_t pbn)
             new = &((*new)->rb_right);
         else
         {
-            pr_err("!!!!!!!!!CALL OF INSERT WHILE PBN ALREADY EXISTS, INVESTIGATE!!!!!\n");
+            pr_err("pbn_rb_insert: !!!!!!!!!CALL OF INSERT WHILE PBN ALREADY EXISTS, INVESTIGATE!!!!!\n");
             return -EINVAL;
         }
     }
@@ -93,6 +89,8 @@ struct pbn_manager *create_pbn_manager(uint64_t start_pbn, uint64_t len)
     manager->ref_root = RB_ROOT;
     manager->start_pbn = start_pbn;
     manager->len = len;
+    manager->alloc_ptr = start_pbn;
+    pr_info("create_pbn_manager: created pbn manager with start_pbn = %llu\n", start_pbn);
     return manager;
 }
 
@@ -130,6 +128,7 @@ int alloc_pbn(struct pbn_manager *manager, uint64_t *pbn)
             }
             *pbn = head;
             manager->alloc_ptr = next_pbn(head, manager->len);
+            manager->occupied_num++;
             return 0;
         }
 
@@ -164,6 +163,7 @@ int dec_refcount(struct pbn_manager *manager, uint64_t pbn)
     {
         // TODO: optimize -- double search occures;
         pbn_rb_remove(&manager->ref_root, pbn);
+        manager->occupied_num--;
     }
     return 0;
 

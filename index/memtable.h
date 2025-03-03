@@ -35,6 +35,7 @@ bool hash_pbn_get(struct hash_pbn_memtable *table, hash_t hash, sector_t **res, 
 struct lbn_pbn_memtable
 {
     struct rb_root root;
+    uint64_t occupied_num;
 };
 
 struct lbn_pbn_memtable *create_lbn_pbn(void);
