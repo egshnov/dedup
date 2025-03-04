@@ -15,3 +15,4 @@
 *.state
 #счетчик строк
 *.VSCodeCounter
+venv
