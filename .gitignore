@@ -12,8 +12,6 @@
 *.o
 *.symvers
 *.order
-
-#вспомгательные скрипты
-*.sh
+*.state
 #счетчик строк
 *.VSCodeCounter

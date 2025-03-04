@@ -1,0 +1,12 @@
+[global]
+thread=1
+verify=sha256
+size=512M
+rw=rw
+bs=4k
+direct=1
+
+[test]
+filename=/dev/mapper/dedup  
+numjobs=1
+
